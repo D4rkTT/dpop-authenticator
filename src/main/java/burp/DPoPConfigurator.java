@@ -4,21 +4,19 @@ import burp.*;
 import javax.swing.*;
 import java.awt.*;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import com.nimbusds.jose.*;
 import com.nimbusds.jose.crypto.*;
 import com.nimbusds.jose.jwk.*;
+import com.nimbusds.jose.util.Base64URL;
 import com.nimbusds.jwt.*;
 
 import java.net.URL;
 import java.security.interfaces.RSAPrivateKey;
-import java.security.interfaces.RSAPublicKey;
 import java.util.*;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.util.Date;
-import java.util.UUID;
 
-public class DPoPConfigurator implements IBurpExtender,ITab, IHttpListener{
+public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
     private IBurpExtenderCallbacks callbacks;
     private IExtensionHelpers helpers;
     PrintWriter stdout;
@@ -31,23 +29,19 @@ public class DPoPConfigurator implements IBurpExtender,ITab, IHttpListener{
     private JCheckBox regexCheckBox;
     private JLabel resultLabel;
 
-
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
         this.callbacks = callbacks;
         this.helpers = callbacks.getHelpers();
-
 
         stdout = new PrintWriter(callbacks.getStdout(), true);
         stderr = new PrintWriter(callbacks.getStderr(), true);
         callbacks.setExtensionName("DPoP Configurator");
         callbacks.registerHttpListener(this);
 
-
-
         SwingUtilities.invokeLater(() -> {
             panel = new JPanel(new GridLayout(30, 3, 5, 5));
-            panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10)); // Padding eklemek için
+            panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
             JLabel infoPublic = new JLabel("Enter Public Key JWK:");
             JLabel infoPrivate = new JLabel("Enter Private Key JWK:");
@@ -61,156 +55,133 @@ public class DPoPConfigurator implements IBurpExtender,ITab, IHttpListener{
             regexCheckBox = new JCheckBox();
             targetHttpHeaderTextField = new JTextField(10);
 
+            resultLabel = new JLabel("", SwingConstants.CENTER);
+            resultLabel.setForeground(Color.BLUE);
 
-            resultLabel = new JLabel("", SwingConstants.CENTER); // Sonuç için etiket
-            resultLabel.setForeground(Color.BLUE); // Mavi renkte metin
-
-            panel.add(infoPublic);
-            panel.add(publicKeyTextField);
-
-            panel.add(infoPrivate);
-            panel.add(privateKeyTextField);
-
-            panel.add(infoTarget);
-            panel.add(targetTextField);
-
-            panel.add(infoRegex);
-            panel.add(regexCheckBox);
-
-            panel.add(infoHTTPHeader);
-            panel.add(targetHttpHeaderTextField);
-
+            panel.add(infoPublic);        panel.add(publicKeyTextField);
+            panel.add(infoPrivate);       panel.add(privateKeyTextField);
+            panel.add(infoTarget);        panel.add(targetTextField);
+            panel.add(infoRegex);         panel.add(regexCheckBox);
+            panel.add(infoHTTPHeader);    panel.add(targetHttpHeaderTextField);
 
             callbacks.customizeUiComponent(panel);
             callbacks.addSuiteTab(DPoPConfigurator.this);
-
         });
     }
 
-    @Override
-   public String getTabCaption() {
-        return "DPoP Configurator";
-    }
+    @Override public String getTabCaption() { return "DPoP Configurator"; }
+    @Override public Component getUiComponent() { return panel; }
 
-    @Override
-    public Component getUiComponent() {
-        return panel;
+    private void log(String msg) {
+        stdout.println("[DPoP] " + msg);
     }
 
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
+        if (!messageIsRequest) return;
 
-        if (!messageIsRequest) {
-            return;
-        }
         IRequestInfo requestInfo = this.callbacks.getHelpers().analyzeRequest(messageInfo);
         String targetUrl = targetTextField.getText();
         boolean isRegex = regexCheckBox.isSelected();
 
         try {
-            if (!targetUrl.isEmpty()){
-                if (isRegex) {
-                    String regexPattern = targetUrl.replace(".", "\\.")
-                            .replace("*", ".*");
+            if (!targetUrl.isEmpty()) {
+                boolean match = isRegex
+                        ? requestInfo.getUrl().toString().matches(targetUrl)
+                        : requestInfo.getUrl().toString().contains(targetUrl);
 
-
-                    if (requestInfo.getUrl().toString().matches(targetUrl)) {
-                        ArrayList<String> headers = editDPopJWT(requestInfo);
-                        byte[] message = helpers.buildHttpMessage(headers, Arrays.copyOfRange(messageInfo.getRequest(), requestInfo.getBodyOffset(), messageInfo.getRequest().length));
-                        messageInfo.setRequest(message);
-
-                    }
-                } else {
-
-                    if (requestInfo.getUrl().toString().contains(targetUrl)) {
-
-                        ArrayList<String> headers = editDPopJWT(requestInfo);
-                        byte[] message = helpers.buildHttpMessage(headers, Arrays.copyOfRange(messageInfo.getRequest(), requestInfo.getBodyOffset(), messageInfo.getRequest().length));
-                        messageInfo.setRequest(message);
-
-
-                    }
+                if (match) {
+                    log("----- Intercepted matching request: " + requestInfo.getUrl() + " -----");
+                    ArrayList<String> headers = editDPopJWT(requestInfo);
+                    byte[] message = helpers.buildHttpMessage(
+                            headers,
+                            Arrays.copyOfRange(messageInfo.getRequest(), requestInfo.getBodyOffset(), messageInfo.getRequest().length));
+                    messageInfo.setRequest(message);
                 }
             }
-
         } catch (Exception e) {
+            stderr.println("[DPoP] ERROR: " + e);
+            e.printStackTrace(stderr);
             throw new RuntimeException(e);
         }
-
-
     }
 
     public ArrayList<String> editDPopJWT(IRequestInfo requestInfo) throws Exception {
-
         String privateKeyJson = privateKeyTextField.getText();
-        String publicKeyJson = publicKeyTextField.getText();
+        String publicKeyJson  = publicKeyTextField.getText();
 
-        RSAPrivateKey privateKey = JWKToPrivateKey(privateKeyJson);
-        RSAPublicKey publicKey = JWKToPublicKey(publicKeyJson);
+        RSAPrivateKey privateKey = (RSAPrivateKey) RSAKey.parse(privateKeyJson).toPrivateKey();
 
-        // Generate JWT
+        // Preserve the EXACT n/e strings from the supplied JWK (no BigInteger round-trip)
+        RSAKey parsedPub = RSAKey.parse(publicKeyJson);
+        Base64URL n = parsedPub.getModulus();
+        Base64URL e = parsedPub.getPublicExponent();
+        String kid = parsedPub.getKeyID();
 
         String headerName = targetHttpHeaderTextField.getText();
 
         URL url = requestInfo.getUrl();
-        String htu = url.getProtocol() + "://" + url.getHost() + url.getPath();
-
-        String jwt = generateDPoPJWT(privateKey,publicKey, requestInfo.getMethod(),htu);
-        ArrayList<String> headers = (ArrayList<String>) requestInfo.getHeaders();
-
-        ArrayList<String> newHeaders = new ArrayList<>();
-
-        for (int i = 0; i < headers.size(); i++) {
-            if (!headers.get(i).startsWith(headerName)) {
-                // there could be more than one header like this; remove and continue
-                newHeaders.add(headers.get(i));
-            }
+        String htu = url.getProtocol() + "://" + url.getHost();
+        if (url.getPort() != -1 && url.getPort() != url.getDefaultPort()) {
+            htu += ":" + url.getPort();
         }
-        String newHeader = headerName + ": "+ jwt;
+        htu += url.getPath();
+        String htm = requestInfo.getMethod();
 
-        newHeaders.add(newHeader);
+        String jwt = generateDPoPJWT(privateKey, n, e, kid, htm, htu);
 
+        ArrayList<String> headers = (ArrayList<String>) requestInfo.getHeaders();
+        ArrayList<String> newHeaders = new ArrayList<>();
+        for (String h : headers) {
+            if (!h.toLowerCase().startsWith(headerName.toLowerCase())) newHeaders.add(h);
+        }
+        newHeaders.add(headerName + ": " + jwt);
         return newHeaders;
     }
 
-
-    private static RSAPrivateKey JWKToPrivateKey(String privateKeyJwk) throws Exception {
-        RSAKey rsaJWK = RSAKey.parse(privateKeyJwk);
-        return (RSAPrivateKey) rsaJWK.toPrivateKey();
-    }
-    private static RSAPublicKey JWKToPublicKey(String privateKeyJwk) throws Exception {
-        RSAKey rsaJWK = RSAKey.parse(privateKeyJwk);
-        return (RSAPublicKey) rsaJWK.toPublicKey();
-    }
-
-    public static String generateDPoPJWT(PrivateKey privateKey, PublicKey publicKey,String htm,String htu) throws JOSEException {
+    public String generateDPoPJWT(RSAPrivateKey privateKey, Base64URL n, Base64URL e,
+                                  String kid, String htm, String htu) throws Exception {
         String jwtID = UUID.randomUUID().toString();
+        Date now = new Date();
 
         JWTClaimsSet claimsSet = new JWTClaimsSet.Builder()
-                .issueTime(new Date())
-                .expirationTime(new Date(System.currentTimeMillis() + 60))
+                .issueTime(now)
+                .expirationTime(new Date(now.getTime() + 120_000)) // FIX: 2 min, was +60 ms
                 .jwtID(jwtID)
                 .claim("htm", htm)
                 .claim("htu", htu)
                 .build();
 
-        JWSHeader.Builder headerBuilder = new JWSHeader.Builder(JWSAlgorithm.RS256);
-        JWK jwk = new RSAKey.Builder((RSAPublicKey) publicKey).build();
-        headerBuilder.jwk(jwk);
-        JOSEObjectType type = new JOSEObjectType("dpop+jwt");
-        headerBuilder.type(type);
+        // FIX: build header jwk straight from the Base64URL strings -> n preserved byte-for-byte
+        JWK jwk = new RSAKey.Builder(n, e)
+                .keyID(kid)
+                .build();
 
-        JWSSigner signer = new RSASSASigner(privateKey);
+        JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.RS256)
+                .type(new JOSEObjectType("dpop+jwt"))
+                .jwk(jwk)
+                .build();
 
-        SignedJWT signedJWT = new SignedJWT(headerBuilder.build(), claimsSet);
-        signedJWT.sign(signer);
+        SignedJWT signedJWT = new SignedJWT(header, claimsSet);
+        signedJWT.sign(new RSASSASigner(privateKey));
+        String out = signedJWT.serialize();
 
-        return signedJWT.serialize();
+        // ---- console logging ----
+        log("htm = " + htm);
+        log("htu = " + htu);
+        log("jti = " + jwtID);
+        log("iat = " + now.getTime() / 1000 + "  exp = " + (now.getTime() + 120_000) / 1000);
+        log("header = " + header.toJSONObject());
+        log("claims = " + claimsSet.toJSONObject());
+        log("jkt (RFC7638 over embedded n/e) = " + jkt(n, e));
+        log("DPoP JWT =\n" + out);
+        log("-------------------------------------------------");
+        return out;
     }
 
-    public static PrivateKey privateKeyFromJson(String privateKeyJson) throws Exception {
-        RSAKey rsaJWK = RSAKey.parse(privateKeyJson);
-        return rsaJWK.toPrivateKey();
+    // Compute the thumbprint the SERVER will derive from the embedded jwk
+    private static String jkt(Base64URL n, Base64URL e) throws Exception {
+        String json = "{\"e\":\"" + e + "\",\"kty\":\"RSA\",\"n\":\"" + n + "\"}";
+        byte[] d = MessageDigest.getInstance("SHA-256").digest(json.getBytes(StandardCharsets.UTF_8));
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(d);
     }
-
-
 }
