@@ -6,7 +6,7 @@ ScreenVersion: 1.0
 SerialVersion: 4
 MinPlatformVersion: 2
 ProOnly: False
-Author: Serhat Cicek
+Author: Serhat Cicek, Abdelnour Osman (Contributor)
 ShortDescription: Dynamically add or update the DPoP (Demonstrating Proof of Possession) HTTP header to outgoing HTTP requests based on configured criteria.
 EntryPoint: target_repo-1.0.jar
 BuildCommand: ./gradlew jar

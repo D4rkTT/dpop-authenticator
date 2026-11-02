@@ -145,7 +145,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
 
         JWTClaimsSet claimsSet = new JWTClaimsSet.Builder()
                 .issueTime(now)
-                .expirationTime(new Date(now.getTime() + 120_000)) // FIX: 2 min, was +60 ms
+                .expirationTime(new Date(now.getTime() + 120_000)) // FIX 2
                 .jwtID(jwtID)
                 .claim("htm", htm)
                 .claim("htu", htu)
