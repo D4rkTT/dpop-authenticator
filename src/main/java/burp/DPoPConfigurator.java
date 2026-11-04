@@ -30,6 +30,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
     private JCheckBox hashBodyCheckBox;
     private JComboBox<String> hashAlgorithmComboBox;
     private JLabel resultLabel;
+    private JCheckBox includeQueryCheckBox;
 
     // UI label -> Java MessageDigest algorithm name
     private static final Map<String, String> HASH_ALGORITHMS = new LinkedHashMap<>();
@@ -75,6 +76,10 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
             hashAlgorithmComboBox.setEnabled(false);
             hashBodyCheckBox.addActionListener(ev ->
                     hashAlgorithmComboBox.setEnabled(hashBodyCheckBox.isSelected()));
+            
+            JLabel infoIncludeQuery = new JLabel("Include Query Params in htu:");
+            includeQueryCheckBox = new JCheckBox();
+            includeQueryCheckBox.setSelected(false);
 
             resultLabel = new JLabel("", SwingConstants.CENTER);
             resultLabel.setForeground(Color.BLUE);
@@ -84,6 +89,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
             panel.add(infoTarget);        panel.add(targetTextField);
             panel.add(infoRegex);         panel.add(regexCheckBox);
             panel.add(infoHTTPHeader);    panel.add(targetHttpHeaderTextField);
+            panel.add(infoIncludeQuery);  panel.add(includeQueryCheckBox);
             panel.add(infoHashBody);      panel.add(hashBodyCheckBox);
             panel.add(infoHashAlgorithm); panel.add(hashAlgorithmComboBox);
 
@@ -151,7 +157,8 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
         }
         htu += url.getPath();
 
-        if (url.getQuery() != null && !url.getQuery().isEmpty()) {
+        if (includeQueryCheckBox.isSelected()
+                && url.getQuery() != null && !url.getQuery().isEmpty()) {
             htu += "?" + url.getQuery();
         }
 
