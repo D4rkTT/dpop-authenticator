@@ -27,7 +27,18 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
     private JTextField targetTextField;
     private JTextField targetHttpHeaderTextField;
     private JCheckBox regexCheckBox;
+    private JCheckBox hashBodyCheckBox;
+    private JComboBox<String> hashAlgorithmComboBox;
     private JLabel resultLabel;
+
+    // UI label -> Java MessageDigest algorithm name
+    private static final Map<String, String> HASH_ALGORITHMS = new LinkedHashMap<>();
+    static {
+        HASH_ALGORITHMS.put("MD5", "MD5");
+        HASH_ALGORITHMS.put("SHA1", "SHA-1");
+        HASH_ALGORITHMS.put("SHA256", "SHA-256");
+        HASH_ALGORITHMS.put("SHA512", "SHA-512");
+    }
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -48,12 +59,22 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
             JLabel infoTarget = new JLabel("Enter Target URL or Target's regex:");
             JLabel infoRegex = new JLabel("Is Regex:");
             JLabel infoHTTPHeader = new JLabel("DPoP HTTP Header:");
+            JLabel infoHashBody = new JLabel("Hash the Body (htb):");
+            JLabel infoHashAlgorithm = new JLabel("Body Hashing Method:");
 
             publicKeyTextField = new JTextField(10);
             privateKeyTextField = new JTextField(10);
             targetTextField = new JTextField(10);
             regexCheckBox = new JCheckBox();
             targetHttpHeaderTextField = new JTextField(10);
+
+            // NEW: htb controls
+            hashBodyCheckBox = new JCheckBox();
+            hashAlgorithmComboBox = new JComboBox<>(HASH_ALGORITHMS.keySet().toArray(new String[0]));
+            hashAlgorithmComboBox.setSelectedItem("SHA256"); // default
+            hashAlgorithmComboBox.setEnabled(false);
+            hashBodyCheckBox.addActionListener(ev ->
+                    hashAlgorithmComboBox.setEnabled(hashBodyCheckBox.isSelected()));
 
             resultLabel = new JLabel("", SwingConstants.CENTER);
             resultLabel.setForeground(Color.BLUE);
@@ -63,6 +84,8 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
             panel.add(infoTarget);        panel.add(targetTextField);
             panel.add(infoRegex);         panel.add(regexCheckBox);
             panel.add(infoHTTPHeader);    panel.add(targetHttpHeaderTextField);
+            panel.add(infoHashBody);      panel.add(hashBodyCheckBox);
+            panel.add(infoHashAlgorithm); panel.add(hashAlgorithmComboBox);
 
             callbacks.customizeUiComponent(panel);
             callbacks.addSuiteTab(DPoPConfigurator.this);
@@ -78,6 +101,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
 
     public void processHttpMessage(int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
         if (!messageIsRequest) return;
+        if (targetTextField == null) return; // UI not built yet
 
         IRequestInfo requestInfo = this.callbacks.getHelpers().analyzeRequest(messageInfo);
         String targetUrl = targetTextField.getText();
@@ -91,10 +115,11 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
 
                 if (match) {
                     log("----- Intercepted matching request: " + requestInfo.getUrl() + " -----");
-                    ArrayList<String> headers = editDPopJWT(requestInfo);
-                    byte[] message = helpers.buildHttpMessage(
-                            headers,
-                            Arrays.copyOfRange(messageInfo.getRequest(), requestInfo.getBodyOffset(), messageInfo.getRequest().length));
+                    byte[] request = messageInfo.getRequest();
+                    byte[] body = Arrays.copyOfRange(request, requestInfo.getBodyOffset(), request.length);
+
+                    ArrayList<String> headers = editDPopJWT(requestInfo, body);
+                    byte[] message = helpers.buildHttpMessage(headers, body);
                     messageInfo.setRequest(message);
                 }
             }
@@ -105,7 +130,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
         }
     }
 
-    public ArrayList<String> editDPopJWT(IRequestInfo requestInfo) throws Exception {
+    public ArrayList<String> editDPopJWT(IRequestInfo requestInfo, byte[] body) throws Exception {
         String privateKeyJson = privateKeyTextField.getText();
         String publicKeyJson  = publicKeyTextField.getText();
 
@@ -125,9 +150,25 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
             htu += ":" + url.getPort();
         }
         htu += url.getPath();
+
+        if (url.getQuery() != null && !url.getQuery().isEmpty()) {
+            htu += "?" + url.getQuery();
+        }
+
         String htm = requestInfo.getMethod();
 
-        String jwt = generateDPoPJWT(privateKey, n, e, kid, htm, htu);
+        // NEW: compute htb only if enabled AND the request actually has a body
+        String htb = null;
+        if (hashBodyCheckBox.isSelected() && body != null && body.length > 0) {
+            String label = (String) hashAlgorithmComboBox.getSelectedItem();
+            if (label == null) label = "SHA256";
+            htb = hashBody(body, HASH_ALGORITHMS.get(label));
+            log("htb algorithm = " + label);
+        } else if (hashBodyCheckBox.isSelected()) {
+            log("htb enabled but request has no body -> htb claim omitted");
+        }
+
+        String jwt = generateDPoPJWT(privateKey, n, e, kid, htm, htu, htb);
 
         ArrayList<String> headers = (ArrayList<String>) requestInfo.getHeaders();
         ArrayList<String> newHeaders = new ArrayList<>();
@@ -139,19 +180,25 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
     }
 
     public String generateDPoPJWT(RSAPrivateKey privateKey, Base64URL n, Base64URL e,
-                                  String kid, String htm, String htu) throws Exception {
+                                  String kid, String htm, String htu, String htb) throws Exception {
         String jwtID = UUID.randomUUID().toString();
         Date now = new Date();
 
-        JWTClaimsSet claimsSet = new JWTClaimsSet.Builder()
+        JWTClaimsSet.Builder claimsBuilder = new JWTClaimsSet.Builder()
                 .issueTime(now)
-                .expirationTime(new Date(now.getTime() + 120_000)) // FIX 2
+                .expirationTime(new Date(now.getTime() + 120_000))
                 .jwtID(jwtID)
                 .claim("htm", htm)
-                .claim("htu", htu)
-                .build();
+                .claim("htu", htu);
 
-        // FIX: build header jwk straight from the Base64URL strings -> n preserved byte-for-byte
+        // NEW: only add htb when a body hash was computed
+        if (htb != null) {
+            claimsBuilder.claim("htb", htb);
+        }
+
+        JWTClaimsSet claimsSet = claimsBuilder.build();
+
+        // Build header jwk straight from the Base64URL strings -> n preserved byte-for-byte
         JWK jwk = new RSAKey.Builder(n, e)
                 .keyID(kid)
                 .build();
@@ -168,6 +215,7 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
         // ---- console logging ----
         log("htm = " + htm);
         log("htu = " + htu);
+        log("htb = " + (htb != null ? htb : "(not set)"));
         log("jti = " + jwtID);
         log("iat = " + now.getTime() / 1000 + "  exp = " + (now.getTime() + 120_000) / 1000);
         log("header = " + header.toJSONObject());
@@ -176,6 +224,16 @@ public class DPoPConfigurator implements IBurpExtender, ITab, IHttpListener {
         log("DPoP JWT =\n" + out);
         log("-------------------------------------------------");
         return out;
+    }
+
+    // NEW: hash the raw body bytes and return hex,
+    private static String hashBody(byte[] body, String algorithm) throws Exception {
+        byte[] digest = MessageDigest.getInstance(algorithm).digest(body);
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            hex.append(String.format("%02x", b));
+        }
+        return hex.toString();
     }
 
     // Compute the thumbprint the SERVER will derive from the embedded jwk
